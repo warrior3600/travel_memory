@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import GoogleMapPanel from './GoogleMapPanel';
-import { buildTripStory, runMemoryCuration } from '../utils/memoryEngine';
+import { api } from '../utils/api';
 
 function parsePeople(value) {
   return value
@@ -9,20 +9,8 @@ function parsePeople(value) {
     .filter(Boolean);
 }
 
-function makePhoto(file, timestamp) {
-  return {
-    id: `photo_${crypto.randomUUID()}`,
-    fileName: file.name,
-    previewUrl: URL.createObjectURL(file),
-    caption: '',
-    timestamp,
-    score: 0,
-    captionEnhanced: ''
-  };
-}
-
-export default function Dashboard({ user, onLogout }) {
-  const previewUrlsRef = useRef(new Set());
+export default function Dashboard({ user, token, onLogout }) {
+  const fileInputRef = useRef(null);
   const [travelForm, setTravelForm] = useState({
     place: '',
     caption: '',
@@ -31,15 +19,17 @@ export default function Dashboard({ user, onLogout }) {
     files: []
   });
   const [travels, setTravels] = useState([]);
-  const [curation, setCuration] = useState({ curatedPhotos: [], scrapbook: [], familiarFaces: [] });
-  const [tripOutput, setTripOutput] = useState({ narration: '', videoPlan: null });
+  const [trips, setTrips] = useState([]);
+  const [activeTripId, setActiveTripId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [saveStatus, setSaveStatus] = useState('');
 
-  useEffect(() => {
-    return () => {
-      previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-      previewUrlsRef.current.clear();
-    };
-  }, []);
+  const activeTrip = useMemo(
+    () => trips.find((trip) => trip.id === activeTripId) || trips[0] || null,
+    [trips, activeTripId]
+  );
 
   const lastPlace = useMemo(() => {
     if (!travels.length) {
@@ -47,6 +37,32 @@ export default function Dashboard({ user, onLogout }) {
     }
     return travels[travels.length - 1].place;
   }, [travels]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    const loadData = async () => {
+      setLoading(true);
+      setError('');
+
+      try {
+        const [travelResp, tripResp] = await Promise.all([api.listTravels(token), api.listTrips(token)]);
+        setTravels(travelResp.travels || []);
+        setTrips(tripResp.trips || []);
+        if (tripResp.trips?.length) {
+          setActiveTripId(tripResp.trips[0].id);
+        }
+      } catch (nextError) {
+        setError(nextError.message || 'Failed to load dashboard data');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, [token]);
 
   const updateForm = (field, value) => {
     setTravelForm((prev) => ({ ...prev, [field]: value }));
@@ -56,71 +72,184 @@ export default function Dashboard({ user, onLogout }) {
     updateForm('files', Array.from(event.target.files || []));
   };
 
-  const addTravel = (event) => {
+  const replaceTrip = (updatedTrip) => {
+    setTrips((prev) => {
+      const idx = prev.findIndex((trip) => trip.id === updatedTrip.id);
+      if (idx === -1) {
+        return [updatedTrip, ...prev];
+      }
+
+      const next = prev.slice();
+      next[idx] = updatedTrip;
+      return next;
+    });
+    setActiveTripId(updatedTrip.id);
+  };
+
+  const addTravel = async (event) => {
     event.preventDefault();
 
     if (!travelForm.place.trim() || !travelForm.timestamp || !travelForm.files.length) {
       return;
     }
 
-    const photos = travelForm.files.map((file) => {
-      const photo = makePhoto(file, travelForm.timestamp);
-      previewUrlsRef.current.add(photo.previewUrl);
-      return photo;
-    });
-    const caption = travelForm.caption.trim();
-    const people = parsePeople(travelForm.people);
+    const formData = new FormData();
+    formData.append('place', travelForm.place.trim());
+    formData.append('caption', travelForm.caption.trim());
+    formData.append('people', parsePeople(travelForm.people).join(', '));
+    formData.append('timestamp', travelForm.timestamp);
 
-    const nextTravel = {
-      id: `travel_${crypto.randomUUID()}`,
-      place: travelForm.place.trim(),
-      people,
-      timestamp: travelForm.timestamp,
-      photos: photos.map((photo) => ({ ...photo, caption: caption || photo.fileName }))
-    };
-
-    setTravels((prev) => [...prev, nextTravel]);
-    setTravelForm({
-      place: '',
-      caption: '',
-      people: '',
-      timestamp: new Date().toISOString().slice(0, 16),
-      files: []
+    travelForm.files.forEach((file) => {
+      formData.append('photos', file);
     });
+
+    setActionLoading(true);
+    setError('');
+
+    try {
+      const response = await api.createTravel(formData, token);
+      setTravels((prev) => [...prev, response.travel]);
+      setTravelForm({
+        place: '',
+        caption: '',
+        people: '',
+        timestamp: new Date().toISOString().slice(0, 16),
+        files: []
+      });
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    } catch (nextError) {
+      setError(nextError.message || 'Failed to upload travel');
+    } finally {
+      setActionLoading(false);
+    }
   };
 
-  const runCuration = () => {
-    const result = runMemoryCuration(travels);
-    setCuration(result);
-    setTripOutput({ narration: '', videoPlan: null });
+  const runCuration = async () => {
+    setActionLoading(true);
+    setError('');
+
+    try {
+      const response = await api.curateTravels(
+        travels.map((travel) => travel.id),
+        token
+      );
+      replaceTrip(response.trip);
+    } catch (nextError) {
+      setError(nextError.message || 'Failed to run curation');
+    } finally {
+      setActionLoading(false);
+    }
   };
 
-  const generateTrip = () => {
-    const result = buildTripStory(curation.curatedPhotos);
-    setTripOutput(result);
+  const generateTrip = async () => {
+    if (!activeTrip) {
+      return;
+    }
+
+    setActionLoading(true);
+    setError('');
+
+    try {
+      const response = await api.createStory(activeTrip.id, token);
+      replaceTrip(response.trip);
+    } catch (nextError) {
+      setError(nextError.message || 'Failed to generate trip story');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const renderVideo = async () => {
+    if (!activeTrip) {
+      return;
+    }
+
+    setActionLoading(true);
+    setError('');
+
+    try {
+      const response = await api.renderVideo(activeTrip.id, token);
+      replaceTrip(response.trip);
+    } catch (nextError) {
+      setError(nextError.message || 'Video rendering failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const updateActiveTrip = (updater) => {
+    setTrips((prev) =>
+      prev.map((trip) => {
+        if (trip.id !== (activeTrip?.id || '')) {
+          return trip;
+        }
+        return updater(trip);
+      })
+    );
+    setSaveStatus('Unsaved edits');
   };
 
   const updateCuratedCaption = (photoId, value) => {
-    setCuration((prev) => ({
-      ...prev,
-      curatedPhotos: prev.curatedPhotos.map((photo) =>
+    updateActiveTrip((trip) => ({
+      ...trip,
+      curatedPhotos: (trip.curatedPhotos || []).map((photo) =>
         photo.id === photoId ? { ...photo, captionEnhanced: value } : photo
       )
     }));
   };
 
   const updateScrapbookEntry = (entryId, value) => {
-    setCuration((prev) => ({
-      ...prev,
-      scrapbook: prev.scrapbook.map((entry) => (entry.id === entryId ? { ...entry, text: value } : entry))
+    updateActiveTrip((trip) => ({
+      ...trip,
+      scrapbook: (trip.scrapbook || []).map((entry) =>
+        entry.id === entryId ? { ...entry, text: value } : entry
+      )
     }));
   };
 
   const updateNarration = (value) => {
-    setTripOutput((prev) => ({ ...prev, narration: value }));
+    updateActiveTrip((trip) => ({
+      ...trip,
+      narration: value
+    }));
   };
 
-  const hasCuratedPhotos = curation.curatedPhotos.length > 0;
+  const saveEdits = async () => {
+    if (!activeTrip) {
+      return;
+    }
+
+    setActionLoading(true);
+    setError('');
+
+    try {
+      const response = await api.updateTrip(
+        activeTrip.id,
+        {
+          narration: activeTrip.narration,
+          scrapbook: activeTrip.scrapbook,
+          curatedPhotos: activeTrip.curatedPhotos
+        },
+        token
+      );
+
+      replaceTrip(response.trip);
+      setSaveStatus('Saved');
+    } catch (nextError) {
+      setError(nextError.message || 'Failed to save edits');
+      setSaveStatus('');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  if (loading) {
+    return <main className="dashboard-page">Loading dashboard...</main>;
+  }
+
+  const hasCuratedPhotos = !!activeTrip?.curatedPhotos?.length;
 
   return (
     <main className="dashboard-page">
@@ -134,62 +263,69 @@ export default function Dashboard({ user, onLogout }) {
         </button>
       </header>
 
-      <section className="dashboard-grid">
-        <GoogleMapPanel focusPlace={lastPlace} curatedPhotos={curation.curatedPhotos} />
+      {error && <div className="error-banner">{error}</div>}
 
-        <section className="input-panel card-shell">
-          <div className="panel-head">
-            <h3>Add Travel Input</h3>
-            <p>Upload photos, place, caption, names of people, and timestamp.</p>
-          </div>
-          <form onSubmit={addTravel}>
-            <label>
-              Place
-              <input
-                type="text"
-                value={travelForm.place}
-                placeholder="Kyoto, Japan"
-                onChange={(event) => updateForm('place', event.target.value)}
-                required
-              />
-            </label>
-            <label>
-              Caption
-              <input
-                type="text"
-                value={travelForm.caption}
-                placeholder="Sunrise walk through old streets"
-                onChange={(event) => updateForm('caption', event.target.value)}
-              />
-            </label>
-            <label>
-              People in photos
-              <input
-                type="text"
-                value={travelForm.people}
-                placeholder="Maya, Noah"
-                onChange={(event) => updateForm('people', event.target.value)}
-              />
-            </label>
-            <label>
-              Timestamp
-              <input
-                type="datetime-local"
-                value={travelForm.timestamp}
-                onChange={(event) => updateForm('timestamp', event.target.value)}
-                required
-              />
-            </label>
-            <label>
-              Photos
-              <input type="file" multiple accept="image/*" onChange={handleFileChange} required />
-            </label>
+      <GoogleMapPanel focusPlace={lastPlace} curatedPhotos={activeTrip?.curatedPhotos || []} />
 
-            <button type="submit" className="primary-pill form-submit">
-              Add Travel
-            </button>
-          </form>
-        </section>
+      <section className="input-panel card-shell">
+        <div className="panel-head">
+          <h3>Add Travel Input</h3>
+          <p>Upload photos, place, caption, names of people, and timestamp.</p>
+        </div>
+        <form onSubmit={addTravel}>
+          <label>
+            Place
+            <input
+              type="text"
+              value={travelForm.place}
+              placeholder="Kyoto, Japan"
+              onChange={(event) => updateForm('place', event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            Caption
+            <input
+              type="text"
+              value={travelForm.caption}
+              placeholder="Sunrise walk through old streets"
+              onChange={(event) => updateForm('caption', event.target.value)}
+            />
+          </label>
+          <label>
+            People in photos
+            <input
+              type="text"
+              value={travelForm.people}
+              placeholder="Maya, Noah"
+              onChange={(event) => updateForm('people', event.target.value)}
+            />
+          </label>
+          <label>
+            Timestamp
+            <input
+              type="datetime-local"
+              value={travelForm.timestamp}
+              onChange={(event) => updateForm('timestamp', event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            Photos
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*"
+              onChange={handleFileChange}
+              required
+            />
+          </label>
+
+          <button type="submit" className="primary-pill form-submit" disabled={actionLoading}>
+            {actionLoading ? 'Working...' : 'Add Travel'}
+          </button>
+        </form>
       </section>
 
       <section className="travel-list card-shell">
@@ -212,18 +348,60 @@ export default function Dashboard({ user, onLogout }) {
         ))}
       </section>
 
+      <section className="trip-list card-shell">
+        <div className="panel-head">
+          <h3>Trips ({trips.length})</h3>
+          <p>Select a curated trip snapshot to edit or render.</p>
+        </div>
+        {!trips.length && <p className="soft-text">No trip created yet.</p>}
+        <div className="trip-pills">
+          {trips.map((trip) => (
+            <button
+              key={trip.id}
+              type="button"
+              className={`trip-pill ${activeTrip?.id === trip.id ? 'active' : ''}`}
+              onClick={() => setActiveTripId(trip.id)}
+            >
+              {new Date(trip.createdAt).toLocaleDateString()} ({trip.curatedPhotos.length} photos)
+            </button>
+          ))}
+        </div>
+      </section>
+
       <section className="actions-row">
-        <button type="button" className="primary-pill" disabled={!travels.length} onClick={runCuration}>
+        <button
+          type="button"
+          className="primary-pill"
+          disabled={!travels.length || actionLoading}
+          onClick={runCuration}
+        >
           Run AI Memory Curation
         </button>
         <button
           type="button"
           className="primary-pill"
-          disabled={!hasCuratedPhotos}
+          disabled={!hasCuratedPhotos || actionLoading}
           onClick={generateTrip}
         >
           Trip Creation
         </button>
+        <button
+          type="button"
+          className="secondary-pill"
+          disabled={!hasCuratedPhotos || actionLoading}
+          onClick={renderVideo}
+        >
+          Render Video Compilation
+        </button>
+        <button
+          type="button"
+          className="secondary-pill"
+          disabled={!activeTrip || actionLoading}
+          onClick={saveEdits}
+        >
+          Save Edits
+        </button>
+        {saveStatus && <small className="soft-text">{saveStatus}</small>}
       </section>
 
       {hasCuratedPhotos && (
@@ -234,7 +412,7 @@ export default function Dashboard({ user, onLogout }) {
               <p>Significant, less-redundant selections with editable AI-enhanced captions.</p>
             </div>
             <div className="curated-list">
-              {curation.curatedPhotos.map((photo) => (
+              {activeTrip.curatedPhotos.map((photo) => (
                 <article key={photo.id} className="curated-item">
                   <img src={photo.previewUrl} alt={photo.fileName} />
                   <div>
@@ -256,7 +434,7 @@ export default function Dashboard({ user, onLogout }) {
               <h3>Scrapbook (Daily Logs)</h3>
               <p>Editable timestamped diary entries generated from curated photos.</p>
             </div>
-            {curation.scrapbook.map((entry) => (
+            {activeTrip.scrapbook.map((entry) => (
               <article key={entry.id} className="log-entry">
                 <strong>{entry.dayLabel}</strong>
                 <textarea
@@ -270,11 +448,11 @@ export default function Dashboard({ user, onLogout }) {
           <section className="card-shell">
             <div className="panel-head">
               <h3>Familiar Faces Tracker</h3>
-              <p>Counts how many travel entries include each person.</p>
+              <p>Name tags and face-embedding matches across travels.</p>
             </div>
-            {!curation.familiarFaces.length && <p className="soft-text">No people references yet.</p>}
-            {curation.familiarFaces.map((person) => (
-              <div key={person.name} className="face-row">
+            {!activeTrip.familiarFaces.length && <p className="soft-text">No people references yet.</p>}
+            {activeTrip.familiarFaces.map((person) => (
+              <div key={`${person.source}-${person.name}`} className="face-row">
                 <span>{person.name}</span>
                 <strong>{person.tripsTogether} travels</strong>
               </div>
@@ -283,7 +461,7 @@ export default function Dashboard({ user, onLogout }) {
         </section>
       )}
 
-      {tripOutput.videoPlan && (
+      {activeTrip?.videoPlan && (
         <section className="trip-output-grid">
           <section className="card-shell">
             <div className="panel-head">
@@ -292,7 +470,7 @@ export default function Dashboard({ user, onLogout }) {
             </div>
             <textarea
               className="story-editor"
-              value={tripOutput.narration}
+              value={activeTrip.narration}
               onChange={(event) => updateNarration(event.target.value)}
             />
           </section>
@@ -300,11 +478,15 @@ export default function Dashboard({ user, onLogout }) {
           <section className="card-shell">
             <div className="panel-head">
               <h3>Video Compilation Plan</h3>
-              <p>Read-only sequence for rendering pipeline (effects + music).</p>
+              <p>Rendered output is generated by FFmpeg on the backend.</p>
             </div>
             <div className="video-plan">
-              <small>Music: {tripOutput.videoPlan.music}</small>
-              {tripOutput.videoPlan.scenes.map((scene) => (
+              <small>Music: {activeTrip.videoPlan.music}</small>
+              <small>Status: {activeTrip.videoStatus}</small>
+              {activeTrip.videoUrl && (
+                <video controls src={activeTrip.videoUrl} style={{ width: '100%', borderRadius: '10px' }} />
+              )}
+              {activeTrip.videoPlan.scenes.map((scene) => (
                 <article key={scene.scene}>
                   <strong>Scene {scene.scene}</strong>
                   <p>{scene.title}</p>

@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 .DS_Store
+server/storage/db.json
+server/storage/uploads/
+server/storage/videos/
+server/storage/tmp/

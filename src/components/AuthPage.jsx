@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export default function AuthPage({ onBack, onAuthSuccess }) {
+export default function AuthPage({ onBack, onSubmit, loading, error }) {
   const [mode, setMode] = useState('login');
   const [form, setForm] = useState({ name: '', email: '', password: '' });
 
@@ -8,15 +8,18 @@ export default function AuthPage({ onBack, onAuthSuccess }) {
     setForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
     const email = form.email.trim();
     if (!email || !form.password.trim()) {
       return;
     }
-
-    const displayName = form.name.trim() || email.split('@')[0];
-    onAuthSuccess({ name: displayName, email });
+    await onSubmit({
+      mode,
+      name: form.name.trim(),
+      email,
+      password: form.password
+    });
   };
 
   return (
@@ -81,9 +84,10 @@ export default function AuthPage({ onBack, onAuthSuccess }) {
             />
           </label>
 
-          <button type="submit" className="primary-pill auth-submit">
-            {mode === 'login' ? 'Enter Dashboard' : 'Create Account'}
+          <button type="submit" className="primary-pill auth-submit" disabled={loading}>
+            {loading ? 'Please wait...' : mode === 'login' ? 'Enter Dashboard' : 'Create Account'}
           </button>
+          {error && <small className="form-error">{error}</small>}
         </form>
       </section>
     </main>

@@ -125,6 +125,11 @@ textarea {
   cursor: not-allowed;
 }
 
+.secondary-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .secondary-pill {
   color: #d0e7ff;
   background: rgba(18, 40, 81, 0.7);
@@ -308,6 +313,10 @@ textarea:focus {
   margin-top: 8px;
 }
 
+.form-error {
+  color: #ff8c8c;
+}
+
 .dashboard-page {
   max-width: 1300px;
   margin: 0 auto;
@@ -329,12 +338,6 @@ textarea:focus {
   font-size: clamp(1.4rem, 2.4vw, 2rem);
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: 1.25fr 1fr;
-  gap: 14px;
-}
-
 .panel-head h3 {
   margin: 0;
   font-family: 'Rajdhani', sans-serif;
@@ -347,6 +350,14 @@ textarea:focus {
   color: var(--text-1);
 }
 
+.error-banner {
+  padding: 12px 14px;
+  border-radius: 12px;
+  color: #ffd3d3;
+  border: 1px solid rgba(255, 145, 145, 0.45);
+  background: rgba(92, 19, 33, 0.45);
+}
+
 .map-panel,
 .input-panel,
 .travel-list,
@@ -355,9 +366,17 @@ textarea:focus {
   padding: 16px;
 }
 
+.map-panel {
+  padding: 12px;
+}
+
+.map-panel-head {
+  padding: 6px 6px 0;
+}
+
 .map-canvas {
-  margin-top: 10px;
-  height: 420px;
+  margin-top: 12px;
+  height: min(78vh, 760px);
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(121, 182, 255, 0.28);
@@ -386,6 +405,31 @@ textarea:focus {
 .travel-list {
   display: grid;
   gap: 10px;
+}
+
+.trip-list {
+  padding: 14px 16px;
+}
+
+.trip-pills {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.trip-pill {
+  border: 1px solid rgba(114, 164, 243, 0.36);
+  background: rgba(7, 24, 53, 0.74);
+  color: #d2e8ff;
+  border-radius: 999px;
+  padding: 9px 13px;
+  cursor: pointer;
+}
+
+.trip-pill.active {
+  background: rgba(24, 96, 212, 0.55);
+  border-color: rgba(103, 176, 255, 0.82);
 }
 
 .travel-row {
@@ -497,7 +541,6 @@ textarea:focus {
 }
 
 @media (max-width: 1080px) {
-  .dashboard-grid,
   .results-grid,
   .trip-output-grid {
     grid-template-columns: 1fr;
@@ -530,6 +573,6 @@ textarea:focus {
   }
 
   .map-canvas {
-    height: 320px;
+    height: min(66vh, 520px);
   }
 }

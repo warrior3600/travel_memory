@@ -1,19 +1,22 @@
-# Travel Memory App (MVP)
+# Travel Memory App (Full-stack MVP)
 
-A themed travel memory application with a neon globe landing page, auth flow, dashboard inputs, AI-style photo curation, scrapbook generation, familiar-faces tracking, and trip story creation.
+A themed travel memory platform with:
+- Interactive globe landing page
+- Signup/login and JWT auth
+- Enlarged Google Maps hybrid dashboard (satellite + city labels)
+- Travel input uploads (photos + place + caption + people + timestamp)
+- Gemini-assisted curation and trip story generation
+- Familiar face tracking (name tags + optional face-embedding provider)
+- FFmpeg video compilation rendering from curated trip photos
 
-## What this build includes
+## Stack
 
-- Landing page inspired by your attached blue-globe theme.
-- Login/Signup screen (local session storage for MVP).
-- Dashboard with:
-  - Google Maps satellite panel (when API key is set)
-  - Travel input form: photos + place + caption + people + timestamp
-  - Travel timeline list
-- Two-stage memory workflow:
-  - **Travel stage:** photo significance scoring, duplicate reduction, AI-style caption enhancement, scrapbook entries, familiar faces count
-  - **Trip stage:** editable text narration and read-only video compilation plan output
-- All generated text outputs are editable in the UI, except the video plan display.
+- Frontend: React + Vite
+- Backend: Node.js + Express
+- Storage: JSON database (`server/storage/db.json`) + local file storage
+- AI provider: Google Gemini API (optional, graceful fallback to deterministic logic)
+- Face embeddings provider: AWS Rekognition (optional)
+- Video rendering: FFmpeg via `ffmpeg-static`
 
 ## Run locally
 
@@ -23,30 +26,49 @@ A themed travel memory application with a neon globe landing page, auth flow, da
 npm install
 ```
 
-2. Add environment variables:
+2. Create env file:
 
 ```bash
 cp .env.example .env
 ```
 
-Set `VITE_GOOGLE_MAPS_API_KEY` in `.env`.
+3. Set required values in `.env`:
 
-3. Start dev server:
+- `JWT_SECRET`
+- `VITE_GOOGLE_MAPS_API_KEY`
+
+Optional integrations:
+- `GEMINI_API_KEY` and `GEMINI_TEXT_MODEL` for text-in/text-out curation and narration
+  - Recommended text model: `gemini-2.5-flash`
+- Optional image model config for future image-generation features:
+  - `GEMINI_IMAGE_MODEL=gemini-2.5-flash-image`
+- `FACE_PROVIDER=aws-rekognition` and AWS credentials for face embedding matches
+
+4. Start client + server:
 
 ```bash
 npm run dev
 ```
 
-## Production extensions you can add next
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:8787`
 
-- Real authentication (Supabase/Firebase/Auth0/your backend).
-- Persist travel/trip data in a DB.
-- Replace heuristic curation with an LLM + vision pipeline.
-- Face embeddings for robust familiar-person matching.
-- Real video rendering pipeline (FFmpeg, cloud render workers, music licensing).
-- Map overlays with custom photo markers and route lines.
+## API overview
+
+- `POST /api/auth/signup`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
+- `GET /api/travels`
+- `POST /api/travels` (multipart photos)
+- `GET /api/trips`
+- `POST /api/trips/curate`
+- `POST /api/trips/:tripId/create-story`
+- `POST /api/trips/:tripId/render-video`
+- `PATCH /api/trips/:tripId` (editable outputs)
 
 ## Notes
 
-- Google Maps requires a valid API key and billing enabled.
-- Current "AI" logic is deterministic and runs in-browser for a fast MVP.
+- Generated text outputs remain editable in the UI and are saved back to backend.
+- Video compilation is intentionally non-editable in UI and rendered on backend.
+- Files are stored under `server/storage/uploads` and `server/storage/videos`.
+- Current persistence is filesystem-based; replace with PostgreSQL/Mongo for production.
