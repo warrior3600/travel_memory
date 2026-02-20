@@ -250,6 +250,17 @@ export default function Dashboard({ user, token, onLogout }) {
   }
 
   const hasCuratedPhotos = !!activeTrip?.curatedPhotos?.length;
+  const mapPhotos = hasCuratedPhotos
+    ? activeTrip.curatedPhotos
+    : travels.flatMap((travel) =>
+        (travel.photos || []).map((photo) => ({
+          ...photo,
+          place: photo.place || travel.place,
+          timestamp: photo.timestamp || travel.timestamp,
+          captionEnhanced: photo.captionEnhanced || photo.caption || '',
+          caption: photo.caption || ''
+        }))
+      );
 
   return (
     <main className="dashboard-page">
@@ -265,7 +276,7 @@ export default function Dashboard({ user, token, onLogout }) {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <GoogleMapPanel focusPlace={lastPlace} curatedPhotos={activeTrip?.curatedPhotos || []} />
+      <GoogleMapPanel focusPlace={lastPlace} curatedPhotos={mapPhotos} />
 
       <section className="input-panel card-shell">
         <div className="panel-head">

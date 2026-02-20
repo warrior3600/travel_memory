@@ -3,6 +3,7 @@ import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
 import bcrypt from 'bcryptjs';
+import exifParser from 'exif-parser';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -40,6 +41,35 @@ function safeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function extractPhotoCoordinates(bytes) {
+  try {
+    const parsed = exifParser.create(bytes).parse();
+    const latitude = parsed?.tags?.GPSLatitude;
+    const longitude = parsed?.tags?.GPSLongitude;
+
+    if (
+      Number.isFinite(latitude) &&
+      Number.isFinite(longitude) &&
+      Math.abs(latitude) <= 90 &&
+      Math.abs(longitude) <= 180
+    ) {
+      return {
+        latitude: Number(latitude),
+        longitude: Number(longitude),
+        hasExactLocation: true
+      };
+    }
+  } catch {
+    // Ignore malformed EXIF and treat as missing GPS metadata.
+  }
+
+  return {
+    latitude: null,
+    longitude: null,
+    hasExactLocation: false
+  };
+}
+
 function serializePhoto(photo) {
   return {
     id: photo.id,
@@ -51,7 +81,12 @@ function serializePhoto(photo) {
     place: photo.place,
     score: photo.score || 0,
     people: photo.people || [],
-    recognizedFaceIds: photo.recognizedFaceIds || []
+    recognizedFaceIds: photo.recognizedFaceIds || [],
+    latitude: Number.isFinite(photo.latitude) ? photo.latitude : null,
+    longitude: Number.isFinite(photo.longitude) ? photo.longitude : null,
+    hasExactLocation: Boolean(photo.hasExactLocation),
+    locationSource: photo.locationSource || 'none',
+    locationConfidence: Number.isFinite(photo.locationConfidence) ? photo.locationConfidence : null
   };
 }
 
@@ -242,10 +277,43 @@ app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, r
 
   try {
     const photos = [];
+    const aiPlaceCoordCache = new Map();
 
     for (const file of req.files) {
       const fileBytes = await fs.readFile(file.path);
       const checksum = checksumBuffer(fileBytes);
+      const location = extractPhotoCoordinates(fileBytes);
+      let latitude = location.latitude;
+      let longitude = location.longitude;
+      let hasExactLocation = location.hasExactLocation;
+      let locationSource = hasExactLocation ? 'exif' : 'none';
+      let locationConfidence = hasExactLocation ? 1 : null;
+
+      if (!hasExactLocation && aiService.enabled) {
+        const cacheKey = `${place.toLowerCase()}::${caption.toLowerCase()}`;
+        let aiCoords = aiPlaceCoordCache.get(cacheKey);
+
+        if (aiCoords === undefined) {
+          try {
+            aiCoords = await aiService.inferCoordinatesFromPlace({
+              place,
+              caption,
+              timestamp
+            });
+          } catch {
+            aiCoords = null;
+          }
+          aiPlaceCoordCache.set(cacheKey, aiCoords);
+        }
+
+        if (aiCoords && Number.isFinite(aiCoords.latitude) && Number.isFinite(aiCoords.longitude)) {
+          latitude = aiCoords.latitude;
+          longitude = aiCoords.longitude;
+          hasExactLocation = false;
+          locationSource = 'ai-place-inference';
+          locationConfidence = aiCoords.confidence ?? 0.45;
+        }
+      }
 
       let recognizedFaceIds = [];
       if (faceService.enabled) {
@@ -274,6 +342,11 @@ app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, r
         timestamp,
         checksum,
         recognizedFaceIds,
+        latitude,
+        longitude,
+        hasExactLocation,
+        locationSource,
+        locationConfidence,
         people,
         mimeType: file.mimetype,
         size: file.size

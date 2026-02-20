@@ -70,5 +70,6 @@ npm run dev
 
 - Generated text outputs remain editable in the UI and are saved back to backend.
 - Video compilation is intentionally non-editable in UI and rendered on backend.
+- Map pins use exact EXIF GPS coordinates when present, with Gemini place-to-coordinate fallback, Google geocoding fallback, and a final approximate text fallback to guarantee visible pins.
 - Files are stored under `server/storage/uploads` and `server/storage/videos`.
 - Current persistence is filesystem-based; replace with PostgreSQL/Mongo for production.

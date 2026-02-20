@@ -74,11 +74,14 @@ export function createGeminiService() {
       },
       async generateNarration() {
         return null;
+      },
+      async inferCoordinatesFromPlace() {
+        return null;
       }
     };
   }
 
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = process.env.GEMINI_TEXT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   return {
     enabled: true,
@@ -196,6 +199,51 @@ export function createGeminiService() {
 
       const payload = await response.json();
       return extractText(payload) || null;
+    },
+
+    async inferCoordinatesFromPlace({ place, caption, timestamp }) {
+      const text = await generateContent({
+        apiKey,
+        model,
+        temperature: 0.1,
+        systemInstruction:
+          'You are a location resolver. Convert place text to a single best latitude/longitude point and return strict JSON only.',
+        prompt: JSON.stringify({
+          place,
+          caption: caption || '',
+          timestamp: timestamp || '',
+          instructions: [
+            'Use globally recognized coordinates for the provided place.',
+            'If location is ambiguous, choose the most likely travel destination and lower confidence.',
+            'If unknown, return null latitude and longitude.'
+          ],
+          schema: {
+            latitude: 0,
+            longitude: 0,
+            confidence: 0.0
+          }
+        })
+      });
+
+      const parsed = parseJsonFromText(text);
+      const latitude = Number(parsed?.latitude);
+      const longitude = Number(parsed?.longitude);
+      const confidence = Number(parsed?.confidence);
+
+      if (
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180
+      ) {
+        return {
+          latitude,
+          longitude,
+          confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.45
+        };
+      }
+
+      return null;
     }
   };
 }
