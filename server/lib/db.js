@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { logger } from './logger.js';
 
 const DB_PATH = path.resolve(process.cwd(), 'server/storage/db.json');
 const DEFAULT_STATE = {
@@ -16,6 +17,7 @@ async function ensureDbFile() {
   } catch {
     await fs.mkdir(path.dirname(DB_PATH), { recursive: true });
     await fs.writeFile(DB_PATH, JSON.stringify(DEFAULT_STATE, null, 2), 'utf8');
+    logger.info('db.init', { dbPath: DB_PATH });
   }
 }
 
@@ -25,12 +27,18 @@ export async function readDb() {
 
   try {
     const parsed = JSON.parse(raw);
+    logger.debug('db.read', {
+      users: parsed.users?.length || 0,
+      travels: parsed.travels?.length || 0,
+      trips: parsed.trips?.length || 0
+    });
     return {
       users: parsed.users || [],
       travels: parsed.travels || [],
       trips: parsed.trips || []
     };
   } catch {
+    logger.warn('db.read.parse_failed');
     return { ...DEFAULT_STATE };
   }
 }
@@ -39,6 +47,11 @@ async function writeDbNow(nextState) {
   await ensureDbFile();
   const payload = JSON.stringify(nextState, null, 2);
   await fs.writeFile(DB_PATH, payload, 'utf8');
+  logger.debug('db.write', {
+    users: nextState.users?.length || 0,
+    travels: nextState.travels?.length || 0,
+    trips: nextState.trips?.length || 0
+  });
 }
 
 export async function writeDb(nextState) {

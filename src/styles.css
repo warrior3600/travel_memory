@@ -368,6 +368,7 @@ textarea:focus {
 
 .map-panel {
   padding: 12px;
+  backdrop-filter: none;
 }
 
 .map-panel-head {
@@ -377,6 +378,8 @@ textarea:focus {
 .map-canvas {
   margin-top: 12px;
   height: min(78vh, 760px);
+  min-height: 420px;
+  position: relative;
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(121, 182, 255, 0.28);

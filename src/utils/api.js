@@ -1,3 +1,4 @@
+import { clientLogger, makeRequestId } from './logger';
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8787';
 
 function toAbsoluteUrl(value) {
@@ -31,6 +32,8 @@ async function request(path, options = {}, token) {
   const headers = {
     ...(options.headers || {})
   };
+  const method = options.method || 'GET';
+  const requestId = makeRequestId();
 
   if (!(options.body instanceof FormData) && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
@@ -39,15 +42,40 @@ async function request(path, options = {}, token) {
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
+  headers['x-request-id'] = requestId;
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const isGet = String(method).toUpperCase() === 'GET';
+  const startTs = Date.now();
+  const requestPath = isGet
+    ? `${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`
+    : path;
+
+  clientLogger.debug('api.request.start', { requestId, method, path });
+
+  const response = await fetch(`${API_BASE}${requestPath}`, {
     ...options,
+    method,
+    cache: 'no-store',
     headers
   });
 
   const payload = await response.json().catch(() => ({}));
+  clientLogger.debug('api.request.finish', {
+    requestId,
+    method,
+    path,
+    status: response.status,
+    durationMs: Date.now() - startTs
+  });
 
   if (!response.ok) {
+    clientLogger.error('api.request.error', {
+      requestId,
+      method,
+      path,
+      status: response.status,
+      error: payload.error || 'Request failed'
+    });
     throw new Error(payload.error || 'Request failed');
   }
 

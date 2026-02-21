@@ -3,12 +3,14 @@ import cors from 'cors';
 import express from 'express';
 import multer from 'multer';
 import bcrypt from 'bcryptjs';
+import exifParser from 'exif-parser';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { authRequired, signToken } from './lib/auth.js';
 import { mutateDb, readDb } from './lib/db.js';
+import { logger } from './lib/logger.js';
 import {
   UPLOADS_ROOT,
   VIDEOS_ROOT,
@@ -24,6 +26,31 @@ const app = express();
 const port = Number(process.env.PORT || 8787);
 const aiService = createGeminiService();
 const faceService = createFaceService();
+const geocodingApiKey =
+  process.env.GOOGLE_MAPS_GEOCODING_API_KEY ||
+  process.env.GOOGLE_GEOCODING_API_KEY ||
+  process.env.VITE_GOOGLE_MAPS_API_KEY ||
+  '';
+
+app.use((req, res, next) => {
+  const requestId = String(req.headers['x-request-id'] || `req_${uuidv4()}`);
+  const startedAt = Date.now();
+  req.requestId = requestId;
+  req.log = logger.child({
+    requestId,
+    method: req.method,
+    path: req.originalUrl
+  });
+  res.setHeader('x-request-id', requestId);
+  req.log.info('request.start');
+  res.on('finish', () => {
+    req.log.info('request.finish', {
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt
+    });
+  });
+  next();
+});
 
 function parsePeople(value) {
   return String(value || '')
@@ -40,6 +67,209 @@ function safeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function extractPhotoCoordinates(bytes) {
+  try {
+    const parsed = exifParser.create(bytes).parse();
+    const latitude = parsed?.tags?.GPSLatitude;
+    const longitude = parsed?.tags?.GPSLongitude;
+
+    if (
+      Number.isFinite(latitude) &&
+      Number.isFinite(longitude) &&
+      Math.abs(latitude) <= 90 &&
+      Math.abs(longitude) <= 180
+    ) {
+      return {
+        latitude: Number(latitude),
+        longitude: Number(longitude),
+        hasExactLocation: true
+      };
+    }
+  } catch {
+    // Ignore malformed EXIF and treat as missing GPS metadata.
+  }
+
+  return {
+    latitude: null,
+    longitude: null,
+    hasExactLocation: false
+  };
+}
+
+function isValidCoordinates(latitude, longitude) {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    Math.abs(latitude) <= 90 &&
+    Math.abs(longitude) <= 180
+  );
+}
+
+async function resolveCoordinatesByGeocoding(place, reqLog) {
+  if (!geocodingApiKey || !place) {
+    return null;
+  }
+
+  const url = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+  url.searchParams.set('address', place);
+  url.searchParams.set('key', geocodingApiKey);
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      reqLog?.warn('travel.location.geocode_http_error', {
+        place,
+        status: response.status
+      });
+      return null;
+    }
+
+    const payload = await response.json();
+    if (payload?.status !== 'OK' || !payload?.results?.[0]?.geometry?.location) {
+      reqLog?.warn('travel.location.geocode_no_result', {
+        place,
+        status: payload?.status || 'unknown'
+      });
+      return null;
+    }
+
+    const latitude = Number(payload.results[0].geometry.location.lat);
+    const longitude = Number(payload.results[0].geometry.location.lng);
+    if (!isValidCoordinates(latitude, longitude)) {
+      reqLog?.warn('travel.location.geocode_invalid_coordinates', {
+        place,
+        latitude,
+        longitude
+      });
+      return null;
+    }
+
+    return {
+      latitude,
+      longitude,
+      confidence: 0.82,
+      source: 'google-geocoding-api'
+    };
+  } catch (error) {
+    reqLog?.warn('travel.location.geocode_failed', {
+      place,
+      error: error?.message || 'unknown'
+    });
+    return null;
+  }
+}
+
+async function backfillMissingCoordinatesForUser(userId, reqLog) {
+  const aiPlaceCoordCache = new Map();
+  const geocodePlaceCoordCache = new Map();
+  const resolvedByPhotoId = new Map();
+  let updatedCount = 0;
+
+  await mutateDb(async (db) => {
+    const travels = db.travels.filter((entry) => entry.userId === userId);
+
+    for (const travel of travels) {
+      for (const photo of travel.photos || []) {
+        const hasStoredCoordinates = isValidCoordinates(photo.latitude, photo.longitude);
+        if (hasStoredCoordinates) {
+          resolvedByPhotoId.set(photo.id, {
+            latitude: photo.latitude,
+            longitude: photo.longitude,
+            locationSource: photo.locationSource || 'stored',
+            locationConfidence: Number.isFinite(photo.locationConfidence) ? photo.locationConfidence : 0.8
+          });
+          continue;
+        }
+
+        const place = String(photo.place || travel.place || '').trim();
+        const caption = String(photo.caption || '').trim();
+        const timestamp = String(photo.timestamp || travel.timestamp || '').trim();
+        if (!place) {
+          continue;
+        }
+
+        let resolved = null;
+        let resolvedSource = '';
+        const aiCacheKey = `${place.toLowerCase()}::${caption.toLowerCase()}::${timestamp.slice(0, 10)}`;
+        if (aiService.enabled) {
+          if (aiPlaceCoordCache.has(aiCacheKey)) {
+            resolved = aiPlaceCoordCache.get(aiCacheKey);
+          } else {
+            try {
+              resolved = await aiService.inferCoordinatesFromPlace({ place, caption, timestamp });
+            } catch (error) {
+              reqLog?.warn('travel.location.backfill_ai_failed', {
+                place,
+                photoId: photo.id,
+                error: error?.message || 'unknown'
+              });
+              resolved = null;
+            }
+            aiPlaceCoordCache.set(aiCacheKey, resolved);
+          }
+        }
+
+        if (resolved && isValidCoordinates(resolved.latitude, resolved.longitude)) {
+          resolvedSource = 'ai-place-inference';
+        }
+
+        if (!resolved || !isValidCoordinates(resolved.latitude, resolved.longitude)) {
+          const geocodeKey = place.toLowerCase();
+          if (geocodePlaceCoordCache.has(geocodeKey)) {
+            resolved = geocodePlaceCoordCache.get(geocodeKey);
+          } else {
+            resolved = await resolveCoordinatesByGeocoding(place, reqLog);
+            geocodePlaceCoordCache.set(geocodeKey, resolved);
+          }
+          if (resolved && isValidCoordinates(resolved.latitude, resolved.longitude)) {
+            resolvedSource = 'google-geocoding-api';
+          }
+        }
+
+        if (resolved && isValidCoordinates(resolved.latitude, resolved.longitude)) {
+          photo.latitude = resolved.latitude;
+          photo.longitude = resolved.longitude;
+          photo.hasExactLocation = false;
+          photo.locationSource = resolved.source || resolvedSource || 'ai-place-inference';
+          photo.locationConfidence = resolved.confidence ?? 0.55;
+          resolvedByPhotoId.set(photo.id, {
+            latitude: photo.latitude,
+            longitude: photo.longitude,
+            locationSource: photo.locationSource,
+            locationConfidence: photo.locationConfidence
+          });
+          updatedCount += 1;
+        }
+      }
+    }
+
+    const trips = db.trips.filter((entry) => entry.userId === userId);
+    for (const trip of trips) {
+      for (const photo of trip.curatedPhotos || []) {
+        if (isValidCoordinates(photo.latitude, photo.longitude)) {
+          continue;
+        }
+        const resolved = resolvedByPhotoId.get(photo.id);
+        if (!resolved) {
+          continue;
+        }
+        photo.latitude = resolved.latitude;
+        photo.longitude = resolved.longitude;
+        photo.hasExactLocation = false;
+        photo.locationSource = resolved.locationSource;
+        photo.locationConfidence = resolved.locationConfidence;
+      }
+    }
+  });
+
+  if (updatedCount > 0) {
+    reqLog?.info('travel.location.backfill_completed', {
+      userId,
+      updatedPhotos: updatedCount
+    });
+  }
+}
+
 function serializePhoto(photo) {
   return {
     id: photo.id,
@@ -51,7 +281,12 @@ function serializePhoto(photo) {
     place: photo.place,
     score: photo.score || 0,
     people: photo.people || [],
-    recognizedFaceIds: photo.recognizedFaceIds || []
+    recognizedFaceIds: photo.recognizedFaceIds || [],
+    latitude: Number.isFinite(photo.latitude) ? photo.latitude : null,
+    longitude: Number.isFinite(photo.longitude) ? photo.longitude : null,
+    hasExactLocation: Boolean(photo.hasExactLocation),
+    locationSource: photo.locationSource || 'none',
+    locationConfidence: Number.isFinite(photo.locationConfidence) ? photo.locationConfidence : null
   };
 }
 
@@ -86,7 +321,7 @@ app.use(
   cors({
     origin: process.env.CLIENT_ORIGIN || true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-request-id']
   })
 );
 app.use(express.json({ limit: '4mb' }));
@@ -129,6 +364,7 @@ app.get('/api/health', (req, res) => {
     aiEnabled: aiService.enabled,
     aiProvider: aiService.provider,
     aiModel: aiService.model,
+    geocodingEnabled: Boolean(geocodingApiKey),
     faceEmbeddingEnabled: faceService.enabled,
     videoRenderingEnabled: true
   });
@@ -223,10 +459,16 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
 });
 
 app.get('/api/travels', authRequired, async (req, res) => {
-  const db = await readDb();
-  const travels = db.travels.filter((travel) => travel.userId === req.user.id);
-  travels.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  res.json({ travels: travels.map(serializeTravel) });
+  try {
+    await backfillMissingCoordinatesForUser(req.user.id, req.log);
+    const db = await readDb();
+    const travels = db.travels.filter((travel) => travel.userId === req.user.id);
+    travels.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    res.json({ travels: travels.map(serializeTravel) });
+  } catch (error) {
+    req.log.error('travel.list.failed', { error: error?.message || 'unknown' });
+    res.status(500).json({ error: 'Failed to list travels', detail: error.message });
+  }
 });
 
 app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, res) => {
@@ -242,10 +484,65 @@ app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, r
 
   try {
     const photos = [];
+    const aiPlaceCoordCache = new Map();
+    const geocodePlaceCoordCache = new Map();
 
     for (const file of req.files) {
       const fileBytes = await fs.readFile(file.path);
       const checksum = checksumBuffer(fileBytes);
+      const location = extractPhotoCoordinates(fileBytes);
+      let latitude = location.latitude;
+      let longitude = location.longitude;
+      let hasExactLocation = location.hasExactLocation;
+      let locationSource = hasExactLocation ? 'exif' : 'none';
+      let locationConfidence = hasExactLocation ? 1 : null;
+
+      if (!hasExactLocation && aiService.enabled) {
+        const cacheKey = `${place.toLowerCase()}::${caption.toLowerCase()}::${timestamp.slice(0, 10)}`;
+        let aiCoords = aiPlaceCoordCache.get(cacheKey);
+
+        if (aiCoords === undefined) {
+          try {
+            aiCoords = await aiService.inferCoordinatesFromPlace({
+              place,
+              caption,
+              timestamp
+            });
+          } catch (error) {
+            req.log.warn('travel.location.ai_inference_failed', {
+              place,
+              error: error?.message || 'unknown'
+            });
+            aiCoords = null;
+          }
+          aiPlaceCoordCache.set(cacheKey, aiCoords);
+        }
+
+        if (aiCoords && isValidCoordinates(aiCoords.latitude, aiCoords.longitude)) {
+          latitude = aiCoords.latitude;
+          longitude = aiCoords.longitude;
+          hasExactLocation = false;
+          locationSource = 'ai-place-inference';
+          locationConfidence = aiCoords.confidence ?? 0.45;
+        }
+      }
+
+      if (!hasExactLocation && !isValidCoordinates(latitude, longitude)) {
+        const geocodeKey = place.toLowerCase();
+        let geocoded = geocodePlaceCoordCache.get(geocodeKey);
+        if (geocoded === undefined) {
+          geocoded = await resolveCoordinatesByGeocoding(place, req.log);
+          geocodePlaceCoordCache.set(geocodeKey, geocoded);
+        }
+
+        if (geocoded && isValidCoordinates(geocoded.latitude, geocoded.longitude)) {
+          latitude = geocoded.latitude;
+          longitude = geocoded.longitude;
+          hasExactLocation = false;
+          locationSource = 'google-geocoding-api';
+          locationConfidence = geocoded.confidence ?? 0.82;
+        }
+      }
 
       let recognizedFaceIds = [];
       if (faceService.enabled) {
@@ -262,6 +559,15 @@ app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, r
       }
 
       const relativePath = `${req.user.id}/${file.filename}`;
+      req.log.info('travel.photo.location_resolved', {
+        fileName: file.originalname,
+        place,
+        latitude: isValidCoordinates(latitude, longitude) ? latitude : null,
+        longitude: isValidCoordinates(latitude, longitude) ? longitude : null,
+        hasExactLocation,
+        locationSource,
+        locationConfidence
+      });
 
       photos.push({
         id: `photo_${uuidv4()}`,
@@ -274,6 +580,11 @@ app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, r
         timestamp,
         checksum,
         recognizedFaceIds,
+        latitude: isValidCoordinates(latitude, longitude) ? latitude : null,
+        longitude: isValidCoordinates(latitude, longitude) ? longitude : null,
+        hasExactLocation,
+        locationSource,
+        locationConfidence,
         people,
         mimeType: file.mimetype,
         size: file.size
@@ -301,12 +612,18 @@ app.post('/api/travels', authRequired, upload.array('photos', 30), async (req, r
 });
 
 app.get('/api/trips', authRequired, async (req, res) => {
-  const db = await readDb();
-  const trips = db.trips
-    .filter((trip) => trip.userId === req.user.id)
-    .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
+  try {
+    await backfillMissingCoordinatesForUser(req.user.id, req.log);
+    const db = await readDb();
+    const trips = db.trips
+      .filter((trip) => trip.userId === req.user.id)
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
 
-  res.json({ trips: trips.map(serializeTrip) });
+    res.json({ trips: trips.map(serializeTrip) });
+  } catch (error) {
+    req.log.error('trip.list.failed', { error: error?.message || 'unknown' });
+    res.status(500).json({ error: 'Failed to list trips', detail: error.message });
+  }
 });
 
 app.post('/api/trips/curate', authRequired, async (req, res) => {
@@ -501,6 +818,10 @@ app.patch('/api/trips/:tripId', authRequired, async (req, res) => {
 
 app.use((error, req, res, next) => {
   if (error) {
+    req?.log?.error('request.error', {
+      statusCode: 400,
+      error: error?.message || 'Request error'
+    });
     res.status(400).json({ error: error.message || 'Request error' });
     return;
   }
@@ -511,5 +832,11 @@ app.use((error, req, res, next) => {
 await ensureStorageDirs();
 
 app.listen(port, () => {
-  console.log(`travel-memory API running on http://localhost:${port}`);
+  logger.info('server.started', {
+    port,
+    url: `http://localhost:${port}`,
+    aiEnabled: aiService.enabled,
+    aiModel: aiService.model,
+    geocodingEnabled: Boolean(geocodingApiKey)
+  });
 });

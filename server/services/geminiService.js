@@ -1,3 +1,5 @@
+import { logger } from '../lib/logger.js';
+
 function extractText(responsePayload) {
   const candidate = responsePayload?.candidates?.[0];
   const parts = candidate?.content?.parts || [];
@@ -25,30 +27,59 @@ function parseJsonFromText(text) {
   }
 }
 
-async function generateContent({ apiKey, model, systemInstruction, prompt, temperature }) {
+async function generateContent({
+  apiKey,
+  model,
+  systemInstruction,
+  prompt,
+  temperature,
+  expectJson = true
+}) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const response = await fetch(url, {
+  const body = {
+    systemInstruction: {
+      parts: [{ text: systemInstruction }]
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: prompt }]
+      }
+    ],
+    generationConfig: {
+      temperature
+    }
+  };
+
+  if (expectJson) {
+    body.generationConfig.responseMimeType = 'application/json';
+  }
+
+  let response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: systemInstruction }]
-      },
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: prompt }]
-        }
-      ],
-      generationConfig: {
-        temperature,
-        responseMimeType: 'application/json'
-      }
-    })
+    body: JSON.stringify(body)
   });
+
+  if (!response.ok && expectJson) {
+    const retryBody = {
+      ...body,
+      generationConfig: {
+        temperature
+      }
+    };
+
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(retryBody)
+    });
+  }
 
   if (!response.ok) {
     const detail = await response.text();
@@ -61,6 +92,12 @@ async function generateContent({ apiKey, model, systemInstruction, prompt, tempe
 
 export function createGeminiService() {
   const apiKey = process.env.GEMINI_API_KEY;
+  const requestedModel = process.env.GEMINI_TEXT_MODEL || process.env.GEMINI_MODEL || '';
+  const model =
+    requestedModel && !/image|vision/i.test(requestedModel)
+      ? requestedModel
+      : 'gemini-2.5-flash';
+
   if (!apiKey) {
     return {
       enabled: false,
@@ -74,11 +111,12 @@ export function createGeminiService() {
       },
       async generateNarration() {
         return null;
+      },
+      async inferCoordinatesFromPlace() {
+        return null;
       }
     };
   }
-
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   return {
     enabled: true,
@@ -196,6 +234,81 @@ export function createGeminiService() {
 
       const payload = await response.json();
       return extractText(payload) || null;
+    },
+
+    async inferCoordinatesFromPlace({ place, caption, timestamp }) {
+      const text = await generateContent({
+        apiKey,
+        model,
+        temperature: 0.1,
+        systemInstruction:
+          'You are a location resolver. Convert place text to a single best latitude/longitude point and return strict JSON only.',
+        prompt: JSON.stringify({
+          place,
+          caption: caption || '',
+          timestamp: timestamp || '',
+          instructions: [
+            'Use globally recognized coordinates for the provided place.',
+            'If location is ambiguous, choose the most likely travel destination and lower confidence.',
+            'If unknown, return null latitude and longitude.'
+          ],
+          schema: {
+            latitude: 0,
+            longitude: 0,
+            confidence: 0.0
+          }
+        })
+      });
+
+      const parsed = parseJsonFromText(text);
+      const parsedLatitude = Number(parsed?.latitude ?? parsed?.lat ?? parsed?.location?.latitude);
+      const parsedLongitude = Number(parsed?.longitude ?? parsed?.lng ?? parsed?.location?.longitude);
+      const confidence = Number(parsed?.confidence);
+      let latitude = parsedLatitude;
+      let longitude = parsedLongitude;
+
+      const isDirectValid =
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180;
+
+      if (!isDirectValid) {
+        const isSwappedValid =
+          Number.isFinite(parsedLatitude) &&
+          Number.isFinite(parsedLongitude) &&
+          Math.abs(parsedLongitude) <= 90 &&
+          Math.abs(parsedLatitude) <= 180;
+
+        if (isSwappedValid) {
+          latitude = parsedLongitude;
+          longitude = parsedLatitude;
+          logger.warn('gemini.coordinates.swapped_fix_applied', {
+            place,
+            rawLatitude: parsedLatitude,
+            rawLongitude: parsedLongitude
+          });
+        }
+      }
+
+      if (
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180
+      ) {
+        return {
+          latitude,
+          longitude,
+          confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.45
+        };
+      }
+
+      logger.warn('gemini.coordinates.invalid_response', {
+        place,
+        parsed
+      });
+      return null;
     }
   };
 }

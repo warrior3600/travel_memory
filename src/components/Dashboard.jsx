@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import GoogleMapPanel from './GoogleMapPanel';
 import { api } from '../utils/api';
+import { clientLogger } from '../utils/logger';
 
 function parsePeople(value) {
   return value
@@ -46,6 +47,7 @@ export default function Dashboard({ user, token, onLogout }) {
     const loadData = async () => {
       setLoading(true);
       setError('');
+      clientLogger.info('dashboard.load.start');
 
       try {
         const [travelResp, tripResp] = await Promise.all([api.listTravels(token), api.listTrips(token)]);
@@ -54,7 +56,14 @@ export default function Dashboard({ user, token, onLogout }) {
         if (tripResp.trips?.length) {
           setActiveTripId(tripResp.trips[0].id);
         }
+        clientLogger.info('dashboard.load.success', {
+          travels: travelResp.travels?.length || 0,
+          trips: tripResp.trips?.length || 0
+        });
       } catch (nextError) {
+        clientLogger.error('dashboard.load.failed', {
+          error: nextError.message || 'Failed to load dashboard data'
+        });
         setError(nextError.message || 'Failed to load dashboard data');
       } finally {
         setLoading(false);
@@ -105,6 +114,10 @@ export default function Dashboard({ user, token, onLogout }) {
 
     setActionLoading(true);
     setError('');
+    clientLogger.info('travel.create.start', {
+      place: travelForm.place.trim(),
+      files: travelForm.files.length
+    });
 
     try {
       const response = await api.createTravel(formData, token);
@@ -119,7 +132,12 @@ export default function Dashboard({ user, token, onLogout }) {
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
+      clientLogger.info('travel.create.success', {
+        travelId: response.travel?.id,
+        photos: response.travel?.photos?.length || 0
+      });
     } catch (nextError) {
+      clientLogger.error('travel.create.failed', { error: nextError.message || 'Failed to upload travel' });
       setError(nextError.message || 'Failed to upload travel');
     } finally {
       setActionLoading(false);
@@ -129,6 +147,7 @@ export default function Dashboard({ user, token, onLogout }) {
   const runCuration = async () => {
     setActionLoading(true);
     setError('');
+    clientLogger.info('trip.curate.start', { travelCount: travels.length });
 
     try {
       const response = await api.curateTravels(
@@ -136,7 +155,9 @@ export default function Dashboard({ user, token, onLogout }) {
         token
       );
       replaceTrip(response.trip);
+      clientLogger.info('trip.curate.success', { tripId: response.trip?.id });
     } catch (nextError) {
+      clientLogger.error('trip.curate.failed', { error: nextError.message || 'Failed to run curation' });
       setError(nextError.message || 'Failed to run curation');
     } finally {
       setActionLoading(false);
@@ -150,11 +171,14 @@ export default function Dashboard({ user, token, onLogout }) {
 
     setActionLoading(true);
     setError('');
+    clientLogger.info('trip.story.start', { tripId: activeTrip.id });
 
     try {
       const response = await api.createStory(activeTrip.id, token);
       replaceTrip(response.trip);
+      clientLogger.info('trip.story.success', { tripId: response.trip?.id });
     } catch (nextError) {
+      clientLogger.error('trip.story.failed', { error: nextError.message || 'Failed to generate trip story' });
       setError(nextError.message || 'Failed to generate trip story');
     } finally {
       setActionLoading(false);
@@ -168,11 +192,17 @@ export default function Dashboard({ user, token, onLogout }) {
 
     setActionLoading(true);
     setError('');
+    clientLogger.info('trip.video.start', { tripId: activeTrip.id });
 
     try {
       const response = await api.renderVideo(activeTrip.id, token);
       replaceTrip(response.trip);
+      clientLogger.info('trip.video.success', {
+        tripId: response.trip?.id,
+        status: response.trip?.videoStatus
+      });
     } catch (nextError) {
+      clientLogger.error('trip.video.failed', { error: nextError.message || 'Video rendering failed' });
       setError(nextError.message || 'Video rendering failed');
     } finally {
       setActionLoading(false);
@@ -223,6 +253,7 @@ export default function Dashboard({ user, token, onLogout }) {
 
     setActionLoading(true);
     setError('');
+    clientLogger.info('trip.save.start', { tripId: activeTrip.id });
 
     try {
       const response = await api.updateTrip(
@@ -237,7 +268,9 @@ export default function Dashboard({ user, token, onLogout }) {
 
       replaceTrip(response.trip);
       setSaveStatus('Saved');
+      clientLogger.info('trip.save.success', { tripId: response.trip?.id });
     } catch (nextError) {
+      clientLogger.error('trip.save.failed', { error: nextError.message || 'Failed to save edits' });
       setError(nextError.message || 'Failed to save edits');
       setSaveStatus('');
     } finally {
@@ -250,6 +283,17 @@ export default function Dashboard({ user, token, onLogout }) {
   }
 
   const hasCuratedPhotos = !!activeTrip?.curatedPhotos?.length;
+  const mapPhotos = hasCuratedPhotos
+    ? activeTrip.curatedPhotos
+    : travels.flatMap((travel) =>
+        (travel.photos || []).map((photo) => ({
+          ...photo,
+          place: photo.place || travel.place,
+          timestamp: photo.timestamp || travel.timestamp,
+          captionEnhanced: photo.captionEnhanced || photo.caption || '',
+          caption: photo.caption || ''
+        }))
+      );
 
   return (
     <main className="dashboard-page">
@@ -265,7 +309,7 @@ export default function Dashboard({ user, token, onLogout }) {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <GoogleMapPanel focusPlace={lastPlace} curatedPhotos={activeTrip?.curatedPhotos || []} />
+      <GoogleMapPanel focusPlace={lastPlace} curatedPhotos={mapPhotos} />
 
       <section className="input-panel card-shell">
         <div className="panel-head">

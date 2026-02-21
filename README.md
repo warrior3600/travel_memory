@@ -41,8 +41,12 @@ Optional integrations:
 - `GEMINI_API_KEY` and `GEMINI_TEXT_MODEL` for text-in/text-out curation and narration
   - Recommended text model: `gemini-2.5-flash`
 - Optional image model config for future image-generation features:
-  - `GEMINI_IMAGE_MODEL=gemini-2.5-flash-image`
+  - `GEMINI_MODEL=gemini-2.5-flash-image`
+- Optional place geocoding fallback for location pinning:
+  - `GOOGLE_MAPS_GEOCODING_API_KEY` (can reuse same Google key if Geocoding API is enabled)
 - `FACE_PROVIDER=aws-rekognition` and AWS credentials for face embedding matches
+- `LOG_LEVEL=debug` for backend structured logs
+- `VITE_DEBUG_LOGS=true` for frontend request/action logs in browser console
 
 4. Start client + server:
 
@@ -70,5 +74,8 @@ npm run dev
 
 - Generated text outputs remain editable in the UI and are saved back to backend.
 - Video compilation is intentionally non-editable in UI and rendered on backend.
+- Map pins use exact EXIF GPS coordinates when present, then Gemini place-to-coordinate inference, then Google Geocoding API fallback, and finally an approximate text fallback.
+- Persisted database file is `server/storage/db.json`.
 - Files are stored under `server/storage/uploads` and `server/storage/videos`.
+- API requests include `x-request-id` so frontend and backend logs can be correlated.
 - Current persistence is filesystem-based; replace with PostgreSQL/Mongo for production.
