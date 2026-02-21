@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { clientLogger } from '../utils/logger';
 
 const DEFAULT_CENTER = { lat: 20, lng: 0 };
 
@@ -38,18 +39,24 @@ function loadGoogleMapsScript(apiKey) {
       return;
     }
 
+    const onAuthFailure = () => {
+      reject(new Error('gm_auth_failure'));
+    };
+
     const existing = document.querySelector('script[data-google-maps]');
     if (existing) {
+      window.gm_authFailure = onAuthFailure;
       existing.addEventListener('load', () => resolve(window.google.maps));
       existing.addEventListener('error', reject);
       return;
     }
 
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly`;
     script.async = true;
     script.defer = true;
     script.dataset.googleMaps = 'true';
+    window.gm_authFailure = onAuthFailure;
     script.onload = () => resolve(window.google.maps);
     script.onerror = reject;
     document.body.appendChild(script);
@@ -57,7 +64,12 @@ function loadGoogleMapsScript(apiKey) {
 }
 
 function hasCoordinates(photo) {
-  return Number.isFinite(photo?.latitude) && Number.isFinite(photo?.longitude);
+  return (
+    Number.isFinite(photo?.latitude) &&
+    Number.isFinite(photo?.longitude) &&
+    Math.abs(Number(photo.latitude)) <= 90 &&
+    Math.abs(Number(photo.longitude)) <= 180
+  );
 }
 
 export default function GoogleMapPanel({ focusPlace, curatedPhotos }) {
@@ -96,22 +108,31 @@ export default function GoogleMapPanel({ focusPlace, curatedPhotos }) {
           zoomControl: true,
           gestureHandling: 'greedy'
         });
+        clientLogger.info('map.init.success', { mapTypeId: 'hybrid' });
 
         maps.event.addListenerOnce(mapInstance.current, 'idle', () => {
           if (isMounted) {
             setStatus('ready');
+            window.setTimeout(() => {
+              if (mapInstance.current && window.google?.maps?.event) {
+                window.google.maps.event.trigger(mapInstance.current, 'resize');
+              }
+            }, 120);
           }
         });
       })
-      .catch(() => {
+      .catch((error) => {
+        clientLogger.error('map.init.failed', { message: error?.message || 'unknown' });
         if (isMounted) {
-          setStatus('error');
+          setStatus(error?.message === 'gm_auth_failure' ? 'auth-failure' : 'error');
         }
       });
 
     return () => {
       isMounted = false;
       renderIdRef.current += 1;
+      mapInstance.current = null;
+      delete window.gm_authFailure;
       if (closeTimerRef.current) {
         window.clearTimeout(closeTimerRef.current);
       }
@@ -163,6 +184,22 @@ export default function GoogleMapPanel({ focusPlace, curatedPhotos }) {
           return;
         }
 
+        const swapLat = Number(photo?.longitude);
+        const swapLng = Number(photo?.latitude);
+        if (
+          Number.isFinite(swapLat) &&
+          Number.isFinite(swapLng) &&
+          Math.abs(swapLat) <= 90 &&
+          Math.abs(swapLng) <= 180
+        ) {
+          resolve({
+            lat: swapLat,
+            lng: swapLng,
+            source: 'stored-swapped-corrected'
+          });
+          return;
+        }
+
         const key = String(photo.place || '').trim().toLowerCase();
         if (!key) {
           resolve(deterministicFallbackPosition(photo, index));
@@ -209,17 +246,29 @@ export default function GoogleMapPanel({ focusPlace, curatedPhotos }) {
         }
 
         const position = { lat: resolved.lat, lng: resolved.lng };
-        const marker = new window.google.maps.Marker({
-          map: mapInstance.current,
-          position,
-          title: photo.place || 'Memory',
-          label: {
-            text: `${idx + 1}`,
-            color: '#ffffff',
-            fontSize: '12px',
-            fontWeight: '700'
-          }
-        });
+        let marker;
+        try {
+          marker = new window.google.maps.Marker({
+            map: mapInstance.current,
+            position,
+            title: photo.place || 'Memory',
+            label: {
+              text: `${idx + 1}`,
+              color: '#ffffff',
+              fontSize: '12px',
+              fontWeight: '700'
+            }
+          });
+        } catch (error) {
+          unresolved += 1;
+          clientLogger.warn('map.pin.invalid_position', {
+            photoId: photo.id,
+            lat: resolved.lat,
+            lng: resolved.lng,
+            message: error?.message || 'Invalid marker coordinates'
+          });
+          continue;
+        }
 
         const safePlace = escapeHtml(photo.place || 'Unknown place');
         const safeCaption = escapeHtml(photo.captionEnhanced || photo.caption || '');
@@ -276,6 +325,9 @@ export default function GoogleMapPanel({ focusPlace, curatedPhotos }) {
 
       if (!bounds.isEmpty() && mapInstance.current) {
         mapInstance.current.fitBounds(bounds, 90);
+      } else if (mapInstance.current) {
+        mapInstance.current.setCenter(DEFAULT_CENTER);
+        mapInstance.current.setZoom(2);
       }
     };
 
@@ -301,6 +353,12 @@ export default function GoogleMapPanel({ focusPlace, curatedPhotos }) {
       {status === 'missing-key' && (
         <div className="map-fallback">
           Add <code>VITE_GOOGLE_MAPS_API_KEY</code> to use live Google Maps.
+        </div>
+      )}
+      {status === 'auth-failure' && (
+        <div className="map-fallback">
+          Google Maps authentication failed. Enable Maps JavaScript API + billing, and allow your
+          localhost referrer for <code>VITE_GOOGLE_MAPS_API_KEY</code>.
         </div>
       )}
       {status === 'error' && (
