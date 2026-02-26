@@ -18,6 +18,14 @@ A themed travel memory platform with:
 - Face embeddings provider: AWS Rekognition (optional)
 - Video rendering: FFmpeg via `ffmpeg-static`
 
+## Demo
+
+
+https://github.com/user-attachments/assets/8bd4123c-828f-4420-8389-2ba10ea22418
+
+
+
+
 ## Run locally
 
 1. Install dependencies:
